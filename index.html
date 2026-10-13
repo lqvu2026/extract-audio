@@ -49,7 +49,7 @@
   .handle::after{content:"";position:absolute;left:12px;top:0;bottom:0;width:6px;border-radius:4px;background:var(--orange);box-shadow:0 0 10px rgba(255,138,61,.7)}
   .handle#hEnd::after{background:var(--mint);box-shadow:0 0 10px rgba(127,240,208,.7)}
   .chips{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-  .chip{flex:1;min-width:0;padding:10px 8px;border-radius:12px;border:1px solid var(--line);background:var(--bg2);color:var(--text);font-size:14px;cursor:pointer;white-space:nowrap}
+  .chip{flex:1;min-width:0;padding:10px 8px;border-radius:12px;border:1px solid var(--line);background:var(--bg2);color:var(--text);font-size:14px;cursor:pointer;white-space:normal;line-height:1.2}
   .chip:active{border-color:var(--mint)}
   .sec{font-size:13px;color:var(--mint);font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-top:18px}
   .meta{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:13px;margin-top:10px;flex-wrap:wrap}
@@ -119,10 +119,11 @@
       </div>
     </div>
     <div class="chips">
-      <button class="chip" id="setStart" type="button">Start = playhead</button>
-      <button class="chip" id="setEnd" type="button">End = playhead</button>
+      <button class="chip" id="setStart" type="button">Set start here</button>
+      <button class="chip" id="setEnd" type="button">Set end here</button>
       <button class="chip" id="playSel" type="button">▶ Preview</button>
     </div>
+    <div class="meta" style="margin-top:8px"><span>Play or scrub the video to a moment (the white line on the waveform), then tap “Set start here” or “Set end here”.</span></div>
     <div class="row">
       <div>
         <label for="fadeIn">Fade in</label>
@@ -202,7 +203,17 @@
   const fadeIn=$('fadeIn'), fadeOut=$('fadeOut'), selInfo=$('selInfo');
 
   let audioBuf=null, videoURL=null, outURL=null, outFile=null, ctx=null;
-  let selStart=0, selEnd=0, previewing=false;
+  let selStart=0, selEnd=0, previewing=false, total=0;
+
+  // wait until the <video> knows its own length (it can be longer than the audio track)
+  function videoMeta() {
+    return new Promise(res => {
+      if (isFinite(video.duration) && video.duration > 0) return res();
+      const done = () => { video.removeEventListener('loadedmetadata', done); res(); };
+      video.addEventListener('loadedmetadata', done);
+      setTimeout(done, 3000);
+    });
+  }
 
   const AC = window.AudioContext || window.webkitAudioContext;
 
@@ -251,9 +262,13 @@
       if (!ctx) ctx = new AC();
       const data = await file.arrayBuffer();
       audioBuf = await ctx.decodeAudioData(data);
-      dur.textContent = fmtTime(audioBuf.duration) + ' · ' + audioBuf.numberOfChannels + ' ch · ' + Math.round(audioBuf.sampleRate/1000) + ' kHz';
+      await videoMeta();
+      total = Math.max(audioBuf.duration, isFinite(video.duration) ? video.duration : 0);
+      const differs = total - audioBuf.duration > 0.5;
+      dur.textContent = (differs ? 'Video ' + fmtTime(total) + ' · audio ' + fmtTime(audioBuf.duration) : fmtTime(total))
+        + ' · ' + audioBuf.numberOfChannels + ' ch · ' + Math.round(audioBuf.sampleRate/1000) + ' kHz';
       drawWave(audioBuf);
-      selStart = 0; selEnd = audioBuf.duration; previewing = false;
+      selStart = 0; selEnd = total; previewing = false;
       fadeIn.value = '0'; fadeOut.value = '0';
       updateSel(); updatePlayhead();
       setStatus('Ready. Drag the handles to trim, then choose a format and tap Extract.');
@@ -274,11 +289,13 @@
     const h = wave.height = Math.floor(wave.clientHeight * dpr);
     const c = wave.getContext('2d');
     const d = buf.getChannelData(0);
-    const step = Math.max(1, Math.floor(d.length / w));
-    const grad = c.createLinearGradient(0,0,w,0);
+    // the audio may be shorter than the video: draw it over its share of the timeline
+    const fw = Math.max(1, Math.floor(w * Math.min(1, buf.duration / (total || buf.duration))));
+    const step = Math.max(1, Math.floor(d.length / fw));
+    const grad = c.createLinearGradient(0,0,fw,0);
     grad.addColorStop(0,'#7ff0d0'); grad.addColorStop(1,'#ff8a3d');
     c.fillStyle = grad;
-    for (let x=0; x<w; x++) {
+    for (let x=0; x<fw; x++) {
       let min=1, max=-1;
       const start = x*step;
       for (let i=0; i<step; i+=Math.max(1,step>>6)) {
@@ -294,7 +311,7 @@
   // ---- trimmer ----
   const MIN_SEL = 0.1;
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  const minGap = () => audioBuf ? Math.min(MIN_SEL, audioBuf.duration) : MIN_SEL;
+  const minGap = () => audioBuf ? Math.min(MIN_SEL, total) : MIN_SEL;
 
   function fmtT(t) {
     const tenths = Math.round(t * 10);
@@ -317,7 +334,7 @@
 
   function updateSel() {
     if (!audioBuf) return;
-    const d = audioBuf.duration;
+    const d = total;
     const ps = selStart / d * 100, pe = selEnd / d * 100;
     hStart.style.left = ps + '%';
     hEnd.style.left = pe + '%';
@@ -325,15 +342,16 @@
     dimR.style.width = (100 - pe) + '%';
     if (document.activeElement !== tStart) tStart.value = fmtT(selStart);
     if (document.activeElement !== tEnd) tEnd.value = fmtT(selEnd);
-    selInfo.textContent = 'Selected: ' + fmtT(selEnd - selStart);
+    const outLen = Math.max(0, Math.min(selEnd, audioBuf.duration) - selStart);
+    selInfo.textContent = 'Selected: ' + fmtT(outLen) + (selEnd > audioBuf.duration + 0.05 ? ' · audio ends at ' + fmtT(audioBuf.duration) : '');
   }
   function updatePlayhead() {
     if (!audioBuf) return;
-    playhead.style.left = clamp(video.currentTime / audioBuf.duration, 0, 1) * 100 + '%';
+    playhead.style.left = clamp(video.currentTime / total, 0, 1) * 100 + '%';
   }
 
   function setStartTime(t) { selStart = clamp(t, 0, selEnd - minGap()); updateSel(); }
-  function setEndTime(t) { selEnd = clamp(t, selStart + minGap(), audioBuf.duration); updateSel(); }
+  function setEndTime(t) { selEnd = clamp(t, selStart + minGap(), total); updateSel(); }
 
   tStart.addEventListener('change', () => {
     const t = parseT(tStart.value);
@@ -357,7 +375,7 @@
       el.setPointerCapture(e.pointerId);
       const move = ev => {
         const r = wavebox.getBoundingClientRect();
-        const t = clamp((ev.clientX - r.left) / r.width, 0, 1) * audioBuf.duration;
+        const t = clamp((ev.clientX - r.left) / r.width, 0, 1) * total;
         if (isStart) setStartTime(t); else setEndTime(t);
       };
       const up = () => {
@@ -379,7 +397,7 @@
   wavebox.addEventListener('click', e => {
     if (!audioBuf || e.target === hStart || e.target === hEnd) return;
     const r = wavebox.getBoundingClientRect();
-    video.currentTime = clamp((e.clientX - r.left) / r.width, 0, 1) * audioBuf.duration;
+    video.currentTime = clamp((e.clientX - r.left) / r.width, 0, 1) * total;
     updatePlayhead();
   });
 
@@ -496,6 +514,7 @@
     go.disabled = true; result.classList.add('hidden'); setProgress(0);
     setStatus(fmt === 'm4a' ? 'Encoding M4A — this takes about as long as the clip…' : 'Encoding…');
     try {
+      if (selStart >= audioBuf.duration - 0.05) throw new Error('The selection starts after the audio track ends (' + fmtT(audioBuf.duration) + ').');
       const seg = sliceBuffer(audioBuf, selStart, selEnd, parseFloat(fadeIn.value), parseFloat(fadeOut.value));
       let blob, ext;
       if (fmt === 'wav') { blob = await encodeWav(seg, setProgress); ext = 'wav'; }
