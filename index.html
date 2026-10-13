@@ -39,7 +39,19 @@
   .drop span{color:var(--muted);font-size:14px}
   input[type=file]{display:none}
   video{width:100%;border-radius:12px;background:#000;max-height:300px;display:block}
-  canvas{width:100%;height:90px;display:block;border-radius:10px;background:var(--bg2);margin-top:12px}
+  .wavebox{position:relative;margin-top:12px;height:90px;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+  canvas{width:100%;height:90px;display:block;border-radius:10px;background:var(--bg2)}
+  .dim{position:absolute;top:0;bottom:0;background:rgba(5,12,30,.62);pointer-events:none}
+  .dim.l{left:0;border-radius:10px 0 0 10px}
+  .dim.r{right:0;border-radius:0 10px 10px 0}
+  .playhead{position:absolute;top:0;bottom:0;width:2px;background:#fff;opacity:.85;pointer-events:none;left:0}
+  .handle{position:absolute;top:-4px;bottom:-4px;width:30px;margin-left:-15px;cursor:ew-resize;touch-action:none;z-index:2}
+  .handle::after{content:"";position:absolute;left:12px;top:0;bottom:0;width:6px;border-radius:4px;background:var(--orange);box-shadow:0 0 10px rgba(255,138,61,.7)}
+  .handle#hEnd::after{background:var(--mint);box-shadow:0 0 10px rgba(127,240,208,.7)}
+  .chips{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .chip{flex:1;min-width:0;padding:10px 8px;border-radius:12px;border:1px solid var(--line);background:var(--bg2);color:var(--text);font-size:14px;cursor:pointer;white-space:nowrap}
+  .chip:active{border-color:var(--mint)}
+  .sec{font-size:13px;color:var(--mint);font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-top:18px}
   .meta{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:13px;margin-top:10px;flex-wrap:wrap}
   label{display:block;font-size:13px;color:var(--muted);margin:14px 0 6px}
   input[type=text],select{
@@ -85,8 +97,57 @@
 
   <div class="card hidden" id="work">
     <video id="video" controls playsinline preload="metadata"></video>
-    <canvas id="wave"></canvas>
+    <div class="wavebox" id="wavebox">
+      <canvas id="wave"></canvas>
+      <div class="dim l" id="dimL"></div>
+      <div class="dim r" id="dimR"></div>
+      <div class="playhead" id="playhead"></div>
+      <div class="handle" id="hStart" role="slider" aria-label="Start"></div>
+      <div class="handle" id="hEnd" role="slider" aria-label="End"></div>
+    </div>
     <div class="meta"><span id="info"></span><span id="dur"></span></div>
+
+    <div class="sec">Trim</div>
+    <div class="row">
+      <div>
+        <label for="tStart">Start</label>
+        <input type="text" id="tStart" inputmode="decimal" autocomplete="off">
+      </div>
+      <div>
+        <label for="tEnd">End</label>
+        <input type="text" id="tEnd" inputmode="decimal" autocomplete="off">
+      </div>
+    </div>
+    <div class="chips">
+      <button class="chip" id="setStart" type="button">Start = playhead</button>
+      <button class="chip" id="setEnd" type="button">End = playhead</button>
+      <button class="chip" id="playSel" type="button">▶ Preview</button>
+    </div>
+    <div class="row">
+      <div>
+        <label for="fadeIn">Fade in</label>
+        <select id="fadeIn">
+          <option value="0" selected>None</option>
+          <option value="0.5">0.5 s</option>
+          <option value="1">1 s</option>
+          <option value="2">2 s</option>
+          <option value="3">3 s</option>
+        </select>
+      </div>
+      <div>
+        <label for="fadeOut">Fade out</label>
+        <select id="fadeOut">
+          <option value="0" selected>None</option>
+          <option value="0.5">0.5 s</option>
+          <option value="1">1 s</option>
+          <option value="2">2 s</option>
+          <option value="3">3 s</option>
+        </select>
+      </div>
+    </div>
+    <div class="meta"><span id="selInfo"></span><span>Preview plays the video part only (no fades)</span></div>
+
+    <div class="sec">Export</div>
 
     <label for="name">File name</label>
     <input type="text" id="name" autocomplete="off" autocapitalize="off" spellcheck="false">
@@ -136,7 +197,12 @@
   const go=$('go'), bar=$('bar'), fill=$('barFill'), statusEl=$('status');
   const result=$('result'), player=$('player'), outName=$('outName'), outSize=$('outSize'), dl=$('dl'), shareBtn=$('share');
 
+  const wavebox=$('wavebox'), dimL=$('dimL'), dimR=$('dimR'), playhead=$('playhead'), hStart=$('hStart'), hEnd=$('hEnd');
+  const tStart=$('tStart'), tEnd=$('tEnd'), setStartBtn=$('setStart'), setEndBtn=$('setEnd'), playSel=$('playSel');
+  const fadeIn=$('fadeIn'), fadeOut=$('fadeOut'), selInfo=$('selInfo');
+
   let audioBuf=null, videoURL=null, outURL=null, outFile=null, ctx=null;
+  let selStart=0, selEnd=0, previewing=false;
 
   const AC = window.AudioContext || window.webkitAudioContext;
 
@@ -187,7 +253,10 @@
       audioBuf = await ctx.decodeAudioData(data);
       dur.textContent = fmtTime(audioBuf.duration) + ' · ' + audioBuf.numberOfChannels + ' ch · ' + Math.round(audioBuf.sampleRate/1000) + ' kHz';
       drawWave(audioBuf);
-      setStatus('Ready. Choose a format and tap Extract.');
+      selStart = 0; selEnd = audioBuf.duration; previewing = false;
+      fadeIn.value = '0'; fadeOut.value = '0';
+      updateSel(); updatePlayhead();
+      setStatus('Ready. Drag the handles to trim, then choose a format and tap Extract.');
       go.disabled = false;
     } catch (err) {
       console.error(err);
@@ -221,6 +290,138 @@
     }
   }
   window.addEventListener('resize', () => { if (audioBuf) drawWave(audioBuf); });
+
+  // ---- trimmer ----
+  const MIN_SEL = 0.1;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const minGap = () => audioBuf ? Math.min(MIN_SEL, audioBuf.duration) : MIN_SEL;
+
+  function fmtT(t) {
+    const tenths = Math.round(t * 10);
+    const m = Math.floor(tenths / 600), s = (tenths % 600) / 10;
+    return m + ':' + s.toFixed(1).padStart(4, '0');
+  }
+  function parseT(str) {
+    str = (str || '').trim().replace(',', '.');
+    if (!str) return null;
+    const parts = str.split(':');
+    if (parts.length > 3) return null;
+    let total = 0;
+    for (const p of parts) {
+      const n = parseFloat(p);
+      if (!isFinite(n) || n < 0) return null;
+      total = total * 60 + n;
+    }
+    return total;
+  }
+
+  function updateSel() {
+    if (!audioBuf) return;
+    const d = audioBuf.duration;
+    const ps = selStart / d * 100, pe = selEnd / d * 100;
+    hStart.style.left = ps + '%';
+    hEnd.style.left = pe + '%';
+    dimL.style.width = ps + '%';
+    dimR.style.width = (100 - pe) + '%';
+    if (document.activeElement !== tStart) tStart.value = fmtT(selStart);
+    if (document.activeElement !== tEnd) tEnd.value = fmtT(selEnd);
+    selInfo.textContent = 'Selected: ' + fmtT(selEnd - selStart);
+  }
+  function updatePlayhead() {
+    if (!audioBuf) return;
+    playhead.style.left = clamp(video.currentTime / audioBuf.duration, 0, 1) * 100 + '%';
+  }
+
+  function setStartTime(t) { selStart = clamp(t, 0, selEnd - minGap()); updateSel(); }
+  function setEndTime(t) { selEnd = clamp(t, selStart + minGap(), audioBuf.duration); updateSel(); }
+
+  tStart.addEventListener('change', () => {
+    const t = parseT(tStart.value);
+    if (t !== null && audioBuf) setStartTime(t);
+    tStart.value = fmtT(selStart);
+  });
+  tEnd.addEventListener('change', () => {
+    const t = parseT(tEnd.value);
+    if (t !== null && audioBuf) setEndTime(t);
+    tEnd.value = fmtT(selEnd);
+  });
+  [tStart, tEnd].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') el.blur(); }));
+
+  setStartBtn.addEventListener('click', () => { if (audioBuf) setStartTime(video.currentTime); });
+  setEndBtn.addEventListener('click', () => { if (audioBuf) setEndTime(video.currentTime); });
+
+  function dragHandle(el, isStart) {
+    el.addEventListener('pointerdown', e => {
+      if (!audioBuf) return;
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      const move = ev => {
+        const r = wavebox.getBoundingClientRect();
+        const t = clamp((ev.clientX - r.left) / r.width, 0, 1) * audioBuf.duration;
+        if (isStart) setStartTime(t); else setEndTime(t);
+      };
+      const up = () => {
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', up);
+        video.currentTime = isStart ? selStart : Math.max(selStart, selEnd - 1);
+        updatePlayhead();
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    });
+  }
+  dragHandle(hStart, true);
+  dragHandle(hEnd, false);
+
+  // tap the waveform to move the playhead
+  wavebox.addEventListener('click', e => {
+    if (!audioBuf || e.target === hStart || e.target === hEnd) return;
+    const r = wavebox.getBoundingClientRect();
+    video.currentTime = clamp((e.clientX - r.left) / r.width, 0, 1) * audioBuf.duration;
+    updatePlayhead();
+  });
+
+  playSel.addEventListener('click', () => {
+    if (!audioBuf) return;
+    if (previewing) { video.pause(); previewing = false; return; }
+    previewing = true;
+    video.currentTime = selStart;
+    video.play().catch(() => { previewing = false; });
+  });
+
+  let rafOn = false;
+  function loop() {
+    updatePlayhead();
+    if (previewing && video.currentTime >= selEnd) { video.pause(); previewing = false; }
+    if (!video.paused && !video.ended) requestAnimationFrame(loop); else rafOn = false;
+  }
+  video.addEventListener('play', () => { if (!rafOn) { rafOn = true; requestAnimationFrame(loop); } });
+  video.addEventListener('pause', () => { updatePlayhead(); });
+  video.addEventListener('seeked', updatePlayhead);
+  video.addEventListener('ended', () => { previewing = false; });
+
+  // Cut the decoded audio to the selection and apply linear fades.
+  function sliceBuffer(buf, start, end, fin, fout) {
+    const sr = buf.sampleRate, ch = buf.numberOfChannels;
+    const i0 = clamp(Math.floor(start * sr), 0, buf.length - 1);
+    const i1 = clamp(Math.ceil(end * sr), i0 + 1, buf.length);
+    const len = i1 - i0;
+    const out = ctx.createBuffer(ch, len, sr);
+    const half = Math.floor(len / 2);
+    const fi = Math.min(Math.floor(fin * sr), half), fo = Math.min(Math.floor(fout * sr), half);
+    for (let c = 0; c < ch; c++) {
+      const src = buf.getChannelData(c), dst = out.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        let g = 1;
+        if (fi > 0 && i < fi) g = i / fi;
+        if (fo > 0 && i >= len - fo) g = Math.min(g, (len - 1 - i) / fo);
+        dst[i] = src[i0 + i] * g;
+      }
+    }
+    return out;
+  }
 
   // ---- encoders ----
   const yieldUI = () => new Promise(r => setTimeout(r, 0));
@@ -295,10 +496,11 @@
     go.disabled = true; result.classList.add('hidden'); setProgress(0);
     setStatus(fmt === 'm4a' ? 'Encoding M4A — this takes about as long as the clip…' : 'Encoding…');
     try {
+      const seg = sliceBuffer(audioBuf, selStart, selEnd, parseFloat(fadeIn.value), parseFloat(fadeOut.value));
       let blob, ext;
-      if (fmt === 'wav') { blob = await encodeWav(audioBuf, setProgress); ext = 'wav'; }
-      else if (fmt === 'm4a') { blob = await encodeM4a(audioBuf, setProgress); ext = 'm4a'; }
-      else { blob = await encodeMp3(audioBuf, parseInt(kbpsSel.value,10), setProgress); ext = 'mp3'; }
+      if (fmt === 'wav') { blob = await encodeWav(seg, setProgress); ext = 'wav'; }
+      else if (fmt === 'm4a') { blob = await encodeM4a(seg, setProgress); ext = 'm4a'; }
+      else { blob = await encodeMp3(seg, parseInt(kbpsSel.value,10), setProgress); ext = 'mp3'; }
       setProgress(1);
 
       const base = cleanName(nameIn.value) || 'audio';
