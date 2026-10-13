@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Extract Audio</title>
+<meta name="theme-color" content="#0d1b3d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Extract Audio">
+<link rel="icon" type="image/png" href="extract-audio-icon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="extract-audio-icon.png">
+<style>
+  :root{
+    --bg:#0d1b3d; --bg2:#14264f; --card:#172b58; --line:#2a437d;
+    --mint:#7ff0d0; --orange:#ff8a3d; --text:#eaf2ff; --muted:#9fb3d9; --danger:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:radial-gradient(1200px 600px at 50% -10%, #1c3470 0%, var(--bg) 60%) fixed;
+    color:var(--text);
+    font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+    padding:max(20px,env(safe-area-inset-top)) 16px max(28px,env(safe-area-inset-bottom));
+  }
+  .wrap{max-width:640px;margin:0 auto}
+  header{display:flex;align-items:center;gap:14px;margin:6px 0 20px}
+  header img{width:64px;height:64px;border-radius:15px;box-shadow:0 0 24px rgba(127,240,208,.25)}
+  h1{font-size:26px;margin:0;letter-spacing:.2px}
+  header p{margin:2px 0 0;color:var(--muted);font-size:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px}
+  .drop{
+    border:2px dashed var(--line);border-radius:16px;padding:28px 16px;text-align:center;cursor:pointer;
+    transition:.15s;background:rgba(255,255,255,.02)
+  }
+  .drop.over,.drop:hover{border-color:var(--mint);background:rgba(127,240,208,.06)}
+  .drop strong{display:block;font-size:18px;margin-bottom:4px}
+  .drop span{color:var(--muted);font-size:14px}
+  input[type=file]{display:none}
+  video{width:100%;border-radius:12px;background:#000;max-height:300px;display:block}
+  canvas{width:100%;height:90px;display:block;border-radius:10px;background:var(--bg2);margin-top:12px}
+  .meta{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:13px;margin-top:10px;flex-wrap:wrap}
+  label{display:block;font-size:13px;color:var(--muted);margin:14px 0 6px}
+  input[type=text],select{
+    width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);
+    background:var(--bg2);color:var(--text);font-size:16px;outline:none
+  }
+  input[type=text]:focus,select:focus{border-color:var(--mint)}
+  .row{display:flex;gap:12px}
+  .row>div{flex:1}
+  .btn{
+    width:100%;margin-top:16px;padding:14px;border:0;border-radius:14px;font-size:17px;font-weight:700;cursor:pointer;
+    background:linear-gradient(135deg,var(--mint),#4fd6b4);color:#06251d;
+  }
+  .btn.alt{background:transparent;border:1px solid var(--mint);color:var(--mint);margin-top:10px}
+  .btn.orange{background:linear-gradient(135deg,#ffa564,var(--orange));color:#2b1200}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .bar{height:8px;border-radius:99px;background:var(--bg2);overflow:hidden;margin-top:14px;display:none}
+  .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--mint),var(--orange));transition:width .1s}
+  #status{margin-top:12px;font-size:14px;color:var(--muted);min-height:20px}
+  #status.err{color:var(--danger)}
+  audio{width:100%;margin-top:6px}
+  .hidden{display:none!important}
+  footer{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="extract-audio-icon.png" alt="" onerror="this.style.display='none'">
+    <div>
+      <h1>Extract Audio</h1>
+      <p>Pull the sound out of any video. Runs in your browser — nothing is uploaded.</p>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a video">
+      <strong>Choose a video</strong>
+      <span>Tap to browse, or drop a file here (MP4, MOV, M4V, WebM…)</span>
+    </div>
+    <input type="file" id="file" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv">
+  </div>
+
+  <div class="card hidden" id="work">
+    <video id="video" controls playsinline preload="metadata"></video>
+    <canvas id="wave"></canvas>
+    <div class="meta"><span id="info"></span><span id="dur"></span></div>
+
+    <label for="name">File name</label>
+    <input type="text" id="name" autocomplete="off" autocapitalize="off" spellcheck="false">
+
+    <div class="row">
+      <div>
+        <label for="fmt">Format</label>
+        <select id="fmt">
+          <option value="mp3">MP3</option>
+          <option value="wav">WAV (lossless)</option>
+          <option value="m4a">M4A (AAC)</option>
+        </select>
+      </div>
+      <div id="qWrap">
+        <label for="kbps">MP3 quality</label>
+        <select id="kbps">
+          <option value="128">128 kbps</option>
+          <option value="192" selected>192 kbps</option>
+          <option value="256">256 kbps</option>
+          <option value="320">320 kbps</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="btn" id="go" disabled>Extract audio</button>
+    <div class="bar" id="bar"><i id="barFill"></i></div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card hidden" id="result">
+    <strong>Your audio is ready</strong>
+    <audio id="player" controls></audio>
+    <div class="meta"><span id="outName"></span><span id="outSize"></span></div>
+    <button class="btn orange" id="dl">Download</button>
+    <button class="btn alt hidden" id="share">Share…</button>
+  </div>
+
+  <footer>Tip: on iPhone, use Share to send the file straight to Messages, Messenger or Files.</footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const drop=$('drop'), fileIn=$('file'), work=$('work'), video=$('video'), wave=$('wave');
+  const info=$('info'), dur=$('dur'), nameIn=$('name'), fmtSel=$('fmt'), kbpsSel=$('kbps'), qWrap=$('qWrap');
+  const go=$('go'), bar=$('bar'), fill=$('barFill'), statusEl=$('status');
+  const result=$('result'), player=$('player'), outName=$('outName'), outSize=$('outSize'), dl=$('dl'), shareBtn=$('share');
+
+  let audioBuf=null, videoURL=null, outURL=null, outFile=null, ctx=null;
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+
+  // M4A needs MediaRecorder with MP4 container support
+  const m4aMime = (() => {
+    if (!window.MediaRecorder) return null;
+    for (const m of ['audio/mp4;codecs=mp4a.40.2','audio/mp4']) {
+      try { if (MediaRecorder.isTypeSupported(m)) return m; } catch(e){}
+    }
+    return null;
+  })();
+  if (!m4aMime) fmtSel.querySelector('option[value="m4a"]').remove();
+
+  const setStatus = (t, err=false) => { statusEl.textContent = t; statusEl.classList.toggle('err', err); };
+  const setProgress = p => { bar.style.display='block'; fill.style.width = Math.round(Math.max(0,Math.min(1,p))*100)+'%'; };
+  const hideProgress = () => { bar.style.display='none'; fill.style.width='0'; };
+  const fmtTime = s => { s=Math.round(s); const m=Math.floor(s/60), r=s%60; return m+':'+String(r).padStart(2,'0'); };
+  const fmtSize = b => b>1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(b/1024))+' KB';
+  const cleanName = n => (n||'').normalize('NFC').replace(/[\\\/:*?"<>|\u0000-\u001f]+/g,'').replace(/^\.+/,'').trim();
+
+  fmtSel.addEventListener('change', () => { qWrap.classList.toggle('hidden', fmtSel.value!=='mp3'); });
+
+  // ---- file picking ----
+  drop.addEventListener('click', () => fileIn.click());
+  drop.addEventListener('keydown', e => { if (e.key==='Enter'||e.key===' ') { e.preventDefault(); fileIn.click(); } });
+  ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => { const f=e.dataTransfer.files[0]; if (f) loadFile(f); });
+  fileIn.addEventListener('change', () => { if (fileIn.files[0]) loadFile(fileIn.files[0]); });
+
+  async function loadFile(file) {
+    result.classList.add('hidden');
+    audioBuf = null; go.disabled = true; hideProgress();
+    if (videoURL) URL.revokeObjectURL(videoURL);
+    videoURL = URL.createObjectURL(file);
+    video.src = videoURL;
+    work.classList.remove('hidden');
+    nameIn.value = cleanName(file.name.replace(/\.[^.]+$/, '')) || 'audio';
+    info.textContent = file.name + ' · ' + fmtSize(file.size);
+    dur.textContent = '';
+    clearWave();
+    setStatus(file.size > 800*1048576 ? 'Large file — reading its audio may take a while on a phone…' : 'Reading audio from the video…');
+
+    try {
+      if (!AC) throw new Error('This browser does not support audio decoding.');
+      if (!ctx) ctx = new AC();
+      const data = await file.arrayBuffer();
+      audioBuf = await ctx.decodeAudioData(data);
+      dur.textContent = fmtTime(audioBuf.duration) + ' · ' + audioBuf.numberOfChannels + ' ch · ' + Math.round(audioBuf.sampleRate/1000) + ' kHz';
+      drawWave(audioBuf);
+      setStatus('Ready. Choose a format and tap Extract.');
+      go.disabled = false;
+    } catch (err) {
+      console.error(err);
+      setStatus("Couldn't read audio from this file. It may have no audio track, or this browser can't decode its format. Try MP4 or MOV from Safari/Chrome.", true);
+    }
+  }
+
+  // ---- waveform ----
+  function clearWave() {
+    const c = wave.getContext('2d'); c.clearRect(0,0,wave.width,wave.height);
+  }
+  function drawWave(buf) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = wave.width = Math.floor(wave.clientWidth * dpr);
+    const h = wave.height = Math.floor(wave.clientHeight * dpr);
+    const c = wave.getContext('2d');
+    const d = buf.getChannelData(0);
+    const step = Math.max(1, Math.floor(d.length / w));
+    const grad = c.createLinearGradient(0,0,w,0);
+    grad.addColorStop(0,'#7ff0d0'); grad.addColorStop(1,'#ff8a3d');
+    c.fillStyle = grad;
+    for (let x=0; x<w; x++) {
+      let min=1, max=-1;
+      const start = x*step;
+      for (let i=0; i<step; i+=Math.max(1,step>>6)) {
+        const v = d[start+i] || 0;
+        if (v<min) min=v; if (v>max) max=v;
+      }
+      const y1 = (1+min)*0.5*h, y2 = (1+max)*0.5*h;
+      c.fillRect(x, y1, 1, Math.max(1, y2-y1));
+    }
+  }
+  window.addEventListener('resize', () => { if (audioBuf) drawWave(audioBuf); });
+
+  // ---- encoders ----
+  const yieldUI = () => new Promise(r => setTimeout(r, 0));
+
+  async function encodeWav(buf, onp) {
+    const ch = Math.min(buf.numberOfChannels, 2), len = buf.length, sr = buf.sampleRate;
+    const dataLen = len * ch * 2;
+    const ab = new ArrayBuffer(44 + dataLen), v = new DataView(ab);
+    const wr = (o, s) => { for (let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+    wr(0,'RIFF'); v.setUint32(4, 36+dataLen, true); wr(8,'WAVE'); wr(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,ch,true);
+    v.setUint32(24,sr,true); v.setUint32(28,sr*ch*2,true); v.setUint16(32,ch*2,true); v.setUint16(34,16,true);
+    wr(36,'data'); v.setUint32(40,dataLen,true);
+    const chans = []; for (let c=0;c<ch;c++) chans.push(buf.getChannelData(c));
+    let o = 44;
+    for (let i=0;i<len;i++) {
+      for (let c=0;c<ch;c++) {
+        const s = Math.max(-1, Math.min(1, chans[c][i]));
+        v.setInt16(o, s<0 ? s*0x8000 : s*0x7fff, true); o += 2;
+      }
+      if ((i & 0x3ffff) === 0) { onp(i/len); await yieldUI(); }
+    }
+    return new Blob([ab], {type:'audio/wav'});
+  }
+
+  const toInt16 = f => {
+    const o = new Int16Array(f.length);
+    for (let i=0;i<f.length;i++) { const s=Math.max(-1,Math.min(1,f[i])); o[i] = s<0 ? s*0x8000 : s*0x7fff; }
+    return o;
+  };
+
+  async function encodeMp3(buf, kbps, onp) {
+    if (!window.lamejs) throw new Error('MP3 encoder failed to load. Check your internet connection and reload, or choose WAV.');
+    const ch = Math.min(buf.numberOfChannels, 2);
+    const enc = new lamejs.Mp3Encoder(ch, buf.sampleRate, kbps);
+    const L = toInt16(buf.getChannelData(0));
+    const R = ch > 1 ? toInt16(buf.getChannelData(1)) : null;
+    const step = 1152 * 20, out = [];
+    for (let i=0, n=0; i<L.length; i+=step, n++) {
+      const l = L.subarray(i, i+step);
+      const d = ch > 1 ? enc.encodeBuffer(l, R.subarray(i, i+step)) : enc.encodeBuffer(l);
+      if (d.length) out.push(new Uint8Array(d));
+      if (n % 10 === 0) { onp(i/L.length); await yieldUI(); }
+    }
+    const f = enc.flush(); if (f.length) out.push(new Uint8Array(f));
+    return new Blob(out, {type:'audio/mpeg'});
+  }
+
+  // M4A: plays the audio into a MediaRecorder, so it takes as long as the clip.
+  function encodeM4a(buf, onp) {
+    return new Promise((resolve, reject) => {
+      const ac = new AC();
+      const dest = ac.createMediaStreamDestination();
+      const src = ac.createBufferSource();
+      src.buffer = buf; src.connect(dest);
+      const chunks = [];
+      let rec;
+      try { rec = new MediaRecorder(dest.stream, {mimeType: m4aMime}); } catch(e) { ac.close(); return reject(e); }
+      rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      rec.onerror = e => { clearInterval(tick); ac.close(); reject(e.error || new Error('Recording failed')); };
+      rec.onstop = () => { clearInterval(tick); ac.close(); resolve(new Blob(chunks, {type:'audio/mp4'})); };
+      const tick = setInterval(() => onp(ac.currentTime / buf.duration), 200);
+      src.onended = () => setTimeout(() => { if (rec.state !== 'inactive') rec.stop(); }, 300);
+      ac.resume().then(() => { rec.start(); src.start(); }).catch(reject);
+    });
+  }
+
+  // ---- extract ----
+  go.addEventListener('click', async () => {
+    if (!audioBuf) return;
+    const fmt = fmtSel.value;
+    go.disabled = true; result.classList.add('hidden'); setProgress(0);
+    setStatus(fmt === 'm4a' ? 'Encoding M4A — this takes about as long as the clip…' : 'Encoding…');
+    try {
+      let blob, ext;
+      if (fmt === 'wav') { blob = await encodeWav(audioBuf, setProgress); ext = 'wav'; }
+      else if (fmt === 'm4a') { blob = await encodeM4a(audioBuf, setProgress); ext = 'm4a'; }
+      else { blob = await encodeMp3(audioBuf, parseInt(kbpsSel.value,10), setProgress); ext = 'mp3'; }
+      setProgress(1);
+
+      const base = cleanName(nameIn.value) || 'audio';
+      const fileName = base + '.' + ext;
+      if (outURL) URL.revokeObjectURL(outURL);
+      outURL = URL.createObjectURL(blob);
+      outFile = new File([blob], fileName, {type: blob.type});
+
+      player.src = outURL;
+      outName.textContent = fileName;
+      outSize.textContent = fmtSize(blob.size);
+      result.classList.remove('hidden');
+      const canShare = navigator.canShare && navigator.canShare({files:[outFile]});
+      shareBtn.classList.toggle('hidden', !canShare);
+      setStatus('Done.');
+      result.scrollIntoView({behavior:'smooth', block:'nearest'});
+    } catch (err) {
+      console.error(err);
+      setStatus('Something went wrong: ' + (err && err.message ? err.message : err), true);
+    } finally {
+      go.disabled = false;
+      setTimeout(hideProgress, 600);
+    }
+  });
+
+  dl.addEventListener('click', () => {
+    if (!outURL || !outFile) return;
+    const a = document.createElement('a');
+    a.href = outURL; a.download = outFile.name;
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+
+  shareBtn.addEventListener('click', async () => {
+    if (!outFile) return;
+    try { await navigator.share({files:[outFile], title: outFile.name}); }
+    catch (e) { if (e.name !== 'AbortError') setStatus('Sharing is not available here — use Download instead.', true); }
+  });
+})();
+</script>
+</body>
+</html>
