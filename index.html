@@ -719,7 +719,7 @@
 
   shareBtn.addEventListener('click', async () => {
     if (!outFile) return;
-    try { await navigator.share({files:[outFile], title: outFile.name}); }
+    try { await navigator.share({files:[outFile]}); }
     catch (e) { if (e.name !== 'AbortError') setStatus('Sharing is not available here — use Download instead.', true); }
   });
 })();
