@@ -244,6 +244,169 @@
   drop.addEventListener('drop', e => { const f=e.dataTransfer.files[0]; if (f) loadFile(f); });
   fileIn.addEventListener('change', () => { if (fileIn.files[0]) loadFile(fileIn.files[0]); });
 
+  // ==DEMUX START==
+  // Pulls just the AAC audio track out of an MP4/MOV (reads only the index and the audio bytes,
+  // not the whole video) and wraps it as ADTS so the browser can decode it.
+  const rdSlice = async (file, s, n) => new Uint8Array(await file.slice(s, s + n).arrayBuffer());
+  const u32 = (b, o) => ((b[o] << 24) | (b[o+1] << 16) | (b[o+2] << 8) | b[o+3]) >>> 0;
+  const u16 = (b, o) => (b[o] << 8) | b[o+1];
+  const fcc = (b, o) => String.fromCharCode(b[o], b[o+1], b[o+2], b[o+3]);
+  const demuxErr = (msg, code) => { const e = new Error(msg); e.code = code || 'DEMUX'; return e; };
+
+  function* kids(b, s, e) {
+    let o = s;
+    while (o + 8 <= e) {
+      let size = u32(b, o), hdr = 8;
+      const type = fcc(b, o + 4);
+      if (size === 1) { size = u32(b, o + 8) * 4294967296 + u32(b, o + 12); hdr = 16; }
+      else if (size === 0) size = e - o;
+      if (size < hdr || o + size > e) return;
+      yield { type, s: o + hdr, e: o + size };
+      o += size;
+    }
+  }
+  const kid = (b, box, type) => { for (const k of kids(b, box.s, box.e)) if (k.type === type) return k; return null; };
+
+  async function readMoov(file) {
+    let off = 0, first = true;
+    while (off + 8 <= file.size) {
+      const h = await rdSlice(file, off, 16);
+      let size = u32(h, 0), hdr = 8;
+      const type = fcc(h, 4);
+      if (first && !['ftyp', 'moov', 'mdat', 'wide', 'free', 'skip', 'pnot'].includes(type)) return null; // not MP4/MOV
+      first = false;
+      if (size === 1) { size = u32(h, 8) * 4294967296 + u32(h, 12); hdr = 16; }
+      else if (size === 0) size = file.size - off;
+      if (size < hdr) return null;
+      if (type === 'moov') {
+        if (size > 400 * 1048576) throw demuxErr('Index too large');
+        return await rdSlice(file, off + hdr, size - hdr);
+      }
+      off += size;
+    }
+    return null;
+  }
+
+  function parseEsds(b, from, to) {
+    // find 'esds' inside the sample entry, then walk its descriptors
+    let p = -1;
+    for (let i = from; i + 4 <= to; i++) if (b[i] === 0x65 && b[i+1] === 0x73 && b[i+2] === 0x64 && b[i+3] === 0x73) { p = i + 4; break; }
+    if (p < 0) throw demuxErr('No codec info');
+    p += 4; // version+flags
+    const len = () => { let n = 0, c; do { c = b[p++]; n = (n << 7) | (c & 0x7f); } while (c & 0x80); return n; };
+    if (b[p++] !== 0x03) throw demuxErr('Bad esds');
+    len(); p += 2; const fl = b[p++];
+    if (fl & 0x80) p += 2;
+    if (fl & 0x40) p += 1 + b[p];
+    if (fl & 0x20) p += 2;
+    if (b[p++] !== 0x04) throw demuxErr('Bad esds');
+    len();
+    const oti = b[p]; p += 13;
+    if (b[p++] !== 0x05) throw demuxErr('No decoder config');
+    const n = len();
+    return { oti, asc: b.subarray(p, p + n) };
+  }
+
+  function parseAsc(asc) {
+    let bit = 0;
+    const rd = n => { let v = 0; for (let i = 0; i < n; i++, bit++) v = (v << 1) | ((asc[bit >> 3] >> (7 - (bit & 7))) & 1); return v; };
+    let aot = rd(5); if (aot === 31) aot = 32 + rd(6);
+    let sfi = rd(4); if (sfi === 15) rd(24);
+    const chan = rd(4);
+    if (aot === 5 || aot === 29) { const x = rd(4); if (x === 15) rd(24); aot = rd(5); if (aot === 31) aot = 32 + rd(6); }
+    return { aot, sfi, chan };
+  }
+
+  // returns an ArrayBuffer of ADTS audio, or null if the file isn't an MP4/MOV
+  async function demuxMp4Audio(file) {
+    const b = await readMoov(file);
+    if (!b) return null;
+    let trak = null;
+    for (const t of kids(b, 0, b.length)) {
+      if (t.type !== 'trak') continue;
+      const mdia = kid(b, t, 'mdia'); const hdlr = mdia && kid(b, mdia, 'hdlr');
+      if (hdlr && fcc(b, hdlr.s + 8) === 'soun') { trak = t; break; }
+    }
+    if (!trak) throw demuxErr('No audio track', 'NOAUDIO');
+
+    const stbl = kid(b, kid(b, kid(b, trak, 'mdia'), 'minf'), 'stbl');
+    const stsd = kid(b, stbl, 'stsd'), stsz = kid(b, stbl, 'stsz'), stsc = kid(b, stbl, 'stsc');
+    const stco = kid(b, stbl, 'stco') || kid(b, stbl, 'co64');
+    if (!stsd || !stsz || !stsc || !stco) throw demuxErr('Incomplete audio index');
+
+    const ent = stsd.s + 8;                       // first sample entry
+    const entEnd = ent + u32(b, ent);
+    if (fcc(b, ent + 4) !== 'mp4a') throw demuxErr('Audio is not AAC');
+    const { oti, asc } = parseEsds(b, ent + 8, Math.min(entEnd, b.length));
+    if (![0x40, 0x66, 0x67, 0x68].includes(oti)) throw demuxErr('Audio is not AAC');
+    const { aot, sfi, chan } = parseAsc(asc);
+    if (aot < 1 || aot > 4 || sfi > 12 || chan < 1 || chan > 7) throw demuxErr('Unsupported AAC variant');
+
+    // sample sizes
+    const cnt = u32(b, stsz.s + 8), fixed = u32(b, stsz.s + 4);
+    if (!cnt) throw demuxErr('Fragmented MP4');
+    const sizes = new Uint32Array(cnt);
+    for (let i = 0; i < cnt; i++) sizes[i] = fixed || u32(b, stsz.s + 12 + i * 4);
+    // chunk offsets
+    const nch = u32(b, stco.s + 4), is64 = stco.type === 'co64';
+    const offs = new Array(nch);
+    for (let i = 0; i < nch; i++) offs[i] = is64 ? u32(b, stco.s + 8 + i * 8) * 4294967296 + u32(b, stco.s + 12 + i * 8) : u32(b, stco.s + 8 + i * 4);
+    // samples per chunk
+    const nsc = u32(b, stsc.s + 4), runs = [];
+    for (let i = 0; i < nsc; i++) runs.push({ first: u32(b, stsc.s + 8 + i * 12), n: u32(b, stsc.s + 12 + i * 12) });
+    const chunks = []; let si = 0;
+    for (let c = 0, r = 0; c < nch && si < cnt; c++) {
+      while (r + 1 < runs.length && runs[r + 1].first <= c + 1) r++;
+      const n = Math.min(runs[r].n, cnt - si);
+      let bytes = 0; for (let k = 0; k < n; k++) bytes += sizes[si + k];
+      chunks.push({ off: offs[c], si, n, bytes });
+      si += n;
+    }
+    if (si !== cnt) throw demuxErr('Audio index mismatch');
+
+    // read audio bytes chunk by chunk (a few at a time) and add ADTS headers
+    let total = 0; for (let i = 0; i < cnt; i++) { if (sizes[i] + 7 > 8191) throw demuxErr('Odd AAC frame'); total += sizes[i] + 7; }
+    const out = new Uint8Array(total);
+    const outPos = new Array(chunks.length); { let p = 0; chunks.forEach((c, i) => { outPos[i] = p; p += c.bytes + 7 * c.n; }); }
+    const writeChunk = (ci, data) => {
+      const c = chunks[ci]; let p = outPos[ci], q = 0;
+      for (let k = 0; k < c.n; k++) {
+        const sz = sizes[c.si + k], fl = sz + 7;
+        out[p] = 0xFF; out[p+1] = 0xF1;
+        out[p+2] = ((aot - 1) << 6) | (sfi << 2) | (chan >> 2);
+        out[p+3] = ((chan & 3) << 6) | ((fl >> 11) & 3);
+        out[p+4] = (fl >> 3) & 0xFF;
+        out[p+5] = ((fl & 7) << 5) | 0x1F;
+        out[p+6] = 0xFC;
+        out.set(data.subarray(q, q + sz), p + 7);
+        p += fl; q += sz;
+      }
+    };
+    for (let i = 0; i < chunks.length; i += 32) {
+      const part = chunks.slice(i, i + 32);
+      const datas = await Promise.all(part.map(c => rdSlice(file, c.off, c.bytes)));
+      datas.forEach((d, k) => {
+        if (d.length < part[k].bytes) throw demuxErr('File is truncated');
+        writeChunk(i + k, d);
+      });
+    }
+    return out.buffer;
+  }
+  // ==DEMUX END==
+
+  // Try the lightweight route first (read only the audio track); fall back to decoding the whole file.
+  async function getAudioBuffer(file) {
+    try {
+      const adts = await demuxMp4Audio(file);
+      if (adts) return await ctx.decodeAudioData(adts);
+    } catch (e) {
+      if (e && e.code === 'NOAUDIO') throw e;
+      console.warn('Audio-track route failed, trying whole file:', e);
+    }
+    if (file.size > 1.8 * 1073741824) throw new Error('File is too large for this browser to read');
+    return await ctx.decodeAudioData(await file.arrayBuffer());
+  }
+
   async function loadFile(file) {
     result.classList.add('hidden');
     audioBuf = null; go.disabled = true; hideProgress();
@@ -260,8 +423,7 @@
     try {
       if (!AC) throw new Error('This browser does not support audio decoding.');
       if (!ctx) ctx = new AC();
-      const data = await file.arrayBuffer();
-      audioBuf = await ctx.decodeAudioData(data);
+      audioBuf = await getAudioBuffer(file);
       await videoMeta();
       total = Math.max(audioBuf.duration, isFinite(video.duration) ? video.duration : 0);
       const differs = total - audioBuf.duration > 0.5;
@@ -275,7 +437,10 @@
       go.disabled = false;
     } catch (err) {
       console.error(err);
-      setStatus("Couldn't read audio from this file. It may have no audio track, or this browser can't decode its format. Try MP4 or MOV from Safari/Chrome.", true);
+      const why = err && err.code === 'NOAUDIO'
+        ? 'This video has no audio track (for example, a screen recording made with the microphone off).'
+        : "Couldn't read audio from this file (" + ((err && (err.name || '')) + ' ' + (err && err.message || '')).trim() + "). Try again, or use a shorter clip or an MP4/MOV file.";
+      setStatus(why, true);
     }
   }
 
